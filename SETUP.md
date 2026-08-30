@@ -1,8 +1,10 @@
 # PDF Tools — Setup & Credentials Checklist
 
-Everything you must provide for the paid/cloud features to work on a real
-build. **The app builds and runs offline with zero setup** — the values below
-only unlock AdMob (real ads), Google Drive, and Play Billing (premium).
+Everything you must provide for the paid/cloud features of **PDF Tools - Edit &
+More** (`com.pdftools.app`) to work on a real build. **The app builds and runs
+offline with zero setup** — the values below only unlock AdMob (real ads),
+Google Drive, and Play Billing (premium). Sections 6–7 cover release signing and
+publishing to Google Play.
 
 All secrets go in **`local.properties`** (git-ignored) or CI environment
 variables. Nothing sensitive is committed. Each key falls back to a safe
@@ -21,6 +23,7 @@ ADMOB_APP_ID=ca-app-pub-XXXXXXXXXXXXXXXX~XXXXXXXXXX
 ADMOB_BANNER_ID=ca-app-pub-XXXXXXXXXXXXXXXX/XXXXXXXXXX
 ADMOB_INTERSTITIAL_ID=ca-app-pub-XXXXXXXXXXXXXXXX/XXXXXXXXXX
 ADMOB_REWARDED_ID=ca-app-pub-XXXXXXXXXXXXXXXX/XXXXXXXXXX
+ADMOB_APP_OPEN_ID=ca-app-pub-XXXXXXXXXXXXXXXX/XXXXXXXXXX
 
 # --- Play Billing (premium / remove ads) ---
 PREMIUM_PRODUCT_ID=premium_remove_ads
@@ -40,14 +43,65 @@ GOOGLE_OAUTH_SERVER_CLIENT_ID=XXXXXXXXXXXX-xxxxxxxx.apps.googleusercontent.com
 1. Create/sign in at <https://apps.admob.com>.
 2. **Apps → Add app** → Android → get the **App ID**
    (`ca-app-pub-…~…`) → put in `ADMOB_APP_ID`.
-3. Create 3 ad units (Banner, Interstitial, Rewarded) → copy each unit ID
-   into the matching `ADMOB_*_ID`.
+3. Create 4 ad units (Banner, Interstitial, Rewarded, App Open) → copy each
+   unit ID into the matching `ADMOB_*_ID`.
 4. Rebuild. The App ID is injected into the manifest via a placeholder; the
-   unit IDs reach code through `BuildConfig`.
+   unit IDs reach code through `BuildConfig`. (App-Open shows when the app
+   returns to the foreground, skipping the first cold start and throttled so
+   it appears at most once every few minutes.)
 
 *Consent:* the UMP (User Messaging Platform) consent flow is already wired and
 runs before ads initialize. For EEA testing you can add a test device in the
 AdMob **Privacy & messaging** settings.
+
+### 1a. `app-ads.txt` (authorized sellers — do this after publishing)
+
+`app-ads.txt` is **not** part of the app/APK. It is a plain-text file you host
+at the **root of your developer website**; AdMob crawls it to confirm you are
+authorized to sell your app's ad inventory (fraud prevention). It only matters
+once the app is **published with your real AdMob IDs** — it does nothing for the
+test IDs above.
+
+**Contents (AdMob-only apps — exactly one line):**
+
+```
+google.com, pub-XXXXXXXXXXXXXXXX, DIRECT, f08c47fec0942fa0
+```
+
+- `google.com` — literal, always.
+- `pub-XXXXXXXXXXXXXXXX` — **the only part you change.** Your AdMob *publisher*
+  ID = `pub-` + the 16 digits **before the `~`** in your App ID
+  (`ca-app-pub-XXXXXXXXXXXXXXXX~XXXXXXXXXX`). Find it in **AdMob → Settings →
+  Account information**.
+- `DIRECT` — literal, always.
+- `f08c47fec0942fa0` — literal, always (Google's certification-authority ID,
+  identical for every publisher).
+
+If you later add other networks/mediation (AppLovin, Unity, Meta, …), add **one
+line per network** — each network gives you its own line to paste.
+
+**Hosting it (free, via GitHub Pages):**
+1. Create a **public** repo named exactly `<your-username>.github.io`.
+2. Add a file named `app-ads.txt` (lowercase) with the line above.
+3. Repo **Settings → Pages** → Source **Deploy from a branch** → **main / (root)**
+   → Save.
+4. Confirm it opens as plain text at
+   `https://<your-username>.github.io/app-ads.txt`.
+
+**Linking it to AdMob:**
+1. Set this URL as your **developer website**: Play Console → **Settings → Developer
+   account → Developer details → Website** (this is the URL AdMob crawls). Also set
+   the per-app **Website** under **Store presence → Store settings** if present.
+2. **AdMob → Apps → View all apps → [your app] → app-ads.txt** tab → copy the
+   expected line shown there (guarantees the correct `pub-` ID) → **Check for
+   updates**.
+3. Status becomes **Authorized** after the crawl — allow 24 h up to a few days
+   for a new file.
+
+> Gotchas: file must be at the **root** (`/app-ads.txt`), served as plain text;
+> the developer/website domain must **match exactly** (watch `www.` vs non-`www.`);
+> the app must be published/linked so AdMob has a website to crawl. Nothing in the
+> Android code, manifest, or Gradle changes for this step.
 
 ---
 
@@ -160,8 +214,72 @@ in-app product to be created.
 ```bash
 ./gradlew :app:assembleDebug      # dev build (com.pdftools.app.debug)
 ./gradlew :app:assembleRelease    # signed release (configure signingConfig)
+./gradlew :app:bundleRelease      # signed .aab for Play upload
 ```
 
 If a Drive dependency ever triggers a `META-INF` packaging clash, it's already
 handled by the `packaging { resources { excludes … } }` block in
 `app/build.gradle.kts` — add the offending path there if a new one appears.
+
+---
+
+## 6. Release signing
+
+Play requires an **`.aab`** signed with a **release keystore** you keep forever
+— lose it and you can no longer update the app.
+
+1. **Create the keystore (one time).** Android Studio: **Build → Generate Signed
+   App Bundle / APK → Android App Bundle → Create new…** Choose a path (e.g.
+   `C:\Users\<you>\keystores\pdftools-release.jks`), a strong password, an alias,
+   and validity ≥ 25 years. **Back up the file and passwords** — they are
+   unrecoverable.
+2. **Provide the credentials** (git-ignored) in `local.properties`:
+   ```properties
+   RELEASE_STORE_FILE=C:/Users/<you>/keystores/pdftools-release.jks
+   RELEASE_STORE_PASSWORD=********
+   RELEASE_KEY_ALIAS=pdftools
+   RELEASE_KEY_PASSWORD=********
+   ```
+3. **Wire the signing config.** The release build's `signingConfig` must be set
+   (either via the Android Studio wizard, or a `signingConfigs { release { … } }`
+   block reading the values above from `local.properties`). Grab the release
+   keystore **SHA-1** for the Drive OAuth client (§2c):
+   ```bash
+   keytool -list -v -keystore /path/to/pdftools-release.jks -alias <your-alias>
+   ```
+
+---
+
+## 7. Publishing to Google Play
+
+**Account prerequisites (start early):**
+- One-time **$25** developer registration.
+- Identity / D-U-N-S **verification** (required for recent accounts; can take days).
+- Personal accounts created after Nov 2023 must run a **closed test with 12+
+  testers for 14 days** before production unlocks — the internal/closed testing
+  below satisfies this.
+
+**Steps:**
+1. **Play Console → Create app.** Name **PDF Tools - Edit & More**, type *App*,
+   **Free** (with in-app purchases), application ID `com.pdftools.app`.
+2. **Complete required declarations:** Privacy policy URL (host it on the same
+   GitHub Pages site as `app-ads.txt`), **Data safety** (files stay on-device;
+   Drive is opt-in; ads use device identifiers), Content rating, Target audience,
+   **Ads = yes**.
+3. **Store listing:** descriptions, 512×512 icon, 1024×500 feature graphic, ≥ 2
+   phone screenshots.
+4. **Upload to a testing track first.** **Testing → Internal testing → Create new
+   release** → upload `app-release.aab`. On first upload Play enrolls you in
+   **Play App Signing** — copy the **App signing key certificate SHA-1** and add
+   it as another Drive OAuth client (§2e). Create/test the Billing product
+   (`premium_remove_ads`) and add License testers (§3) on this track. Install via
+   the tester link and verify tools, ads, Drive, and Premium.
+5. **Promote to production.** **Production → Create new release** → reuse the
+   bundle → set a staged rollout % → submit. First review typically takes a few
+   days to ~a week. Live at
+   `https://play.google.com/store/apps/details?id=com.pdftools.app`.
+
+> Reminder: real AdMob IDs (§1), the Drive OAuth clients + all SHA-1s (§2), and
+> the active Billing product (§3) must be in place before the published build's
+> paid/cloud features work. The `.debug` build cannot query Billing or (without
+> its own OAuth client) Drive.
